@@ -119,7 +119,7 @@ class RegistrationQuadTree:
     def __init__(self, source_slide_path:Path, target_slide_path:Path, source_boundary:Rect=None, target_boundary:Rect=None,
                         depth=0, target_depth=1, thumbnail_size=(2048, 2048),
                         run_async=False, node_orientation:NodeOrientation = NodeOrientation.TOP,
-                        parent=None, homography:bool=True, filter_outliner:bool=False, **kwargs):
+                        parent=None, homography:bool=True, filter_outliner:bool=False, num_workers:int=2, **kwargs):
         """[summary]
         Init the current quadtree level
 
@@ -136,11 +136,12 @@ class RegistrationQuadTree:
             parent ([RegistrationQuadTree], optional): [parent quad-tree]. Defaults to None.
             homography (bool, optional): [use cv.findHomography or a probReg]. Defaults to True.
             filter_outliner (bool, optional): [description]. Defaults to False.
+            num_workers (int, optional): [current depth]. Defaults to 2.
         """
 
 
         kwargs.update({"run_async":run_async, "thumbnail_size":thumbnail_size, "homography":homography, 
-                        "filter_outliner":filter_outliner, "target_depth":target_depth})
+                        "filter_outliner":filter_outliner, "target_depth":target_depth, "num_workers": num_workers})
         
         self.kwargs = kwargs
         self.parent = parent
@@ -149,6 +150,7 @@ class RegistrationQuadTree:
         self.thumbnail_size = thumbnail_size
         self.depth = depth
         self.target_depth = target_depth 
+        self.num_workers = num_workers
         self.source_slide_path = source_slide_path if isinstance(source_slide_path, Path) else Path(source_slide_path)
         self.target_slide_path = target_slide_path if isinstance(target_slide_path, Path) else Path(target_slide_path)
 
@@ -303,44 +305,6 @@ class RegistrationQuadTree:
         if self.se is not None: self.se.target_slide_dimensions = dimensions
         if self.sw is not None: self.sw.target_slide_dimensions = dimensions
 
-    """
-    @property
-    def source_slide(self):
-
-        if self._source_slide is None:
-            raise Exception('Please set source_slide and target_slide after pickle load')
-
-        return self._source_slide
-
-    @source_slide.setter 
-    def source_slide(self, slide):
-
-        self._source_slide = slide
-
-        if self.nw is not None: self.nw.source_slide = slide
-        if self.ne is not None: self.ne.source_slide = slide
-        if self.se is not None: self.se.source_slide = slide
-        if self.sw is not None: self.sw.source_slide = slide
-
-    @property
-    def target_slide(self):
-
-        if self._target_slide is None:
-            raise Exception('Please set source_slide and target_slide after pickle load')
-
-        return self._target_slide
-
-    @target_slide.setter 
-    def target_slide(self, slide):
-
-        self._target_slide = slide
-
-        if self.nw is not None: self.nw.target_slide = slide
-        if self.ne is not None: self.ne.target_slide = slide
-        if self.se is not None: self.se.target_slide = slide
-        if self.sw is not None: self.sw.target_slide = slide
-    """
-
     @property
     def source_path(self):
         return self.source_slide_path
@@ -427,7 +391,7 @@ class RegistrationQuadTree:
             qt_functions[NodeOrientation.SOUTH_WEST] = functools.partial(RegistrationQuadTree, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_sw, target_boundary=target_sw,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_WEST, parent=self, **self.kwargs)
 
         if self.run_async == True:
-            with concurrent.futures.ThreadPoolExecutor() as executor: # ProcessPoolExecutor  ThreadPoolExecutor
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_workers) as executor: # ProcessPoolExecutor  ThreadPoolExecutor
 
                 submitted = {executor.submit(func) : area  for area, func in qt_functions.items()}
                 for future in concurrent.futures.as_completed(submitted):

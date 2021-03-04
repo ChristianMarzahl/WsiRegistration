@@ -25,6 +25,7 @@ class TestRegistrationMethods(unittest.TestCase):
                 "debug": True,
                 "target_depth": 0,
                 "run_async": True,
+                "num_workers": 2,
                 "thumbnail_size": (1024, 1024)
             }
 
