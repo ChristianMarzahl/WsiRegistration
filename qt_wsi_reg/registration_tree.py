@@ -765,6 +765,9 @@ class RegistrationQuadTree:
 
         attributes = self.__dict__.copy()
 
+        attributes["source_slide_path"] = str(self.source_slide_path)
+        attributes["target_slide_path"] = str(self.target_slide_path)
+
         del attributes['matchedVis']
         del attributes['_source_thumbnail']
         del attributes['_target_thumbnail']
@@ -778,6 +781,9 @@ class RegistrationQuadTree:
         self._source_thumbnail = None
         self._target_thumbnail = None
         self.matchedVis = None
+
+        self.source_slide_path = Path(self.__dict__["source_slide_path"])
+        self.target_slide_path = Path(self.__dict__["target_slide_path"])
 
         self.tf_param = tf.AffineTransformation(self.__dict__["b"], self.__dict__["t"])
 
