@@ -14,7 +14,7 @@ import matplotlib.gridspec as gridspec
 import matplotlib.patches as patches
 import matplotlib.pyplot as plt
 import numpy as np
-from openslide import OpenSlide
+import openslide 
 from PIL import Image
 from probreg import cpd
 from probreg import transformation as tf
@@ -161,12 +161,12 @@ class RegistrationQuadTree:
         self.target_boundary = target_boundary 
         
         if self.source_boundary == None: 
-            source_slide = OpenSlide(str(source_slide_path))
+            source_slide = openslide.open_slide(str(source_slide_path))
             self._source_slide_dimensions = source_slide.dimensions
             self.source_boundary = Rect.create(Rect, 0, 0, source_slide.dimensions[0], source_slide.dimensions[1])
 
         if self.target_boundary == None: 
-            target_slide = OpenSlide(str(target_slide_path))    
+            target_slide = openslide.open_slide(str(target_slide_path))    
             self._target_slide_dimensions = target_slide.dimensions
             self.target_boundary = Rect.create(Rect, 0, 0, target_slide.dimensions[0], target_slide.dimensions[1])
 
@@ -272,7 +272,7 @@ class RegistrationQuadTree:
     def source_slide_dimensions(self):
 
         if self._source_slide_dimensions is None:
-            self.source_slide_dimensions = OpenSlide(str(self.source_slide_path)).dimensions
+            self.source_slide_dimensions = openslide.open_slide(str(self.source_slide_path)).dimensions
         
         return self._source_slide_dimensions
 
@@ -291,7 +291,7 @@ class RegistrationQuadTree:
     def target_slide_dimensions(self):
 
         if self._target_slide_dimensions is None:
-            self._target_slide_dimensions = OpenSlide(str(self.target_slide_path)).dimensions
+            self._target_slide_dimensions = openslide.open_slide(str(self.target_slide_path)).dimensions
         
         return self._target_slide_dimensions
 
@@ -434,8 +434,8 @@ class RegistrationQuadTree:
         f_ax_match = fig.add_subplot(gs[:2, :])
         f_ax_match.imshow(self.matchedVis)
 
-        source_slide = OpenSlide(str(self.source_slide_path))
-        target_slide = OpenSlide(str(self.target_slide_path))
+        source_slide = openslide.open_slide(str(self.source_slide_path))
+        target_slide = openslide.open_slide(str(self.target_slide_path))
 
         tf_temp = tf.AffineTransformation(self.tf_param.b, self.tf_param.t)
         
@@ -571,8 +571,8 @@ class RegistrationQuadTree:
         f_ax_match = fig.add_subplot(gs[:2, :])
         f_ax_match.imshow(self.matchedVis)
 
-        source_slide = OpenSlide(str(self.source_slide_path))
-        target_slide = OpenSlide(str(self.target_slide_path))
+        source_slide = openslide.open_slide(str(self.source_slide_path))
+        target_slide = openslide.open_slide(str(self.target_slide_path))
         
         for idx, (source_box, target_box)  in enumerate(zip(source_boxes[:num_sub_pic], target_boxes[:num_sub_pic])):
             size = 512
@@ -743,7 +743,7 @@ class RegistrationQuadTree:
 
         scale = []
 
-        slide = OpenSlide(str(slide_path))
+        slide = openslide.open_slide(str(slide_path))
         downsample = max(*[dim / thumb for dim, thumb in zip((boundary.w, boundary.h), (size[0] * depth, size[1] * depth))])        
         level = slide.get_best_level_for_downsample(downsample)
 
