@@ -1,5 +1,6 @@
 import itertools
 import pickle
+import math
 import time
 from enum import Enum
 from functools import wraps
@@ -7,7 +8,9 @@ from inspect import currentframe
 from pathlib import Path
 import concurrent.futures
 import functools
+import operator
 
+from numpy.linalg import inv
 import cv2
 import matplotlib as mpl
 import matplotlib.gridspec as gridspec
@@ -19,7 +22,7 @@ from PIL import Image
 from probreg import cpd
 from probreg import transformation as tf
 from sklearn.neighbors import LocalOutlierFactor
-
+from scipy import interpolate
 
 class NodeOrientation(Enum):
     """[summary]
@@ -60,7 +63,7 @@ class Point:
 class Rect:
     """A rectangle centred at (cx, cy) with width w and height h."""
 
-    def __init__(self, cx, cy, w, h):
+    def __init__(self, cx:float, cy:float, w:float, h:float):
         self.cx, self.cy = cx, cy
         self.w, self.h = w, h
         self.west_edge, self.east_edge = cx - w/2, cx + w/2
@@ -74,7 +77,7 @@ class Rect:
         return '({:.2f}, {:.2f}, {:.2f}, {:.2f})'.format(self.west_edge,
                     self.north_edge, self.east_edge, self.south_edge)
 
-    def create(cls, x, y, w, h):
+    def create(cls, x:float, y:float, w:float, h:float):
 
         cx, cy = x + w // 2, y + h // 2
 
@@ -109,6 +112,42 @@ class Rect:
         x2, y2 = self.east_edge, self.south_edge
         ax.plot([x1,x2,x2,x1,x1],[y1,y1,y2,y2,y1], c=c, lw=lw, **kwargs)
 
+
+class RotatedRect:
+    """A rectangle based on the four corner points."""
+
+    def __init__(self, p1:tuple, p2:tuple, p3:tuple, p4:tuple):
+
+
+        self.p1, self.p2, self.p3, self.p4 = p1, p2, p3, p4
+        self.point_array = np.array([p1, p2, p3, p4])
+        self.rect = cv2.minAreaRect(self.point_array.astype(int))
+        self.box = cv2.boxPoints(self.rect)
+
+        self.cx, self.cy = self.rect[0]
+        self.h_min, self.w_min = self.rect[1]
+        self.angle = self.rect[2]
+        
+        self.west_edge = min(self.point_array[:, 0]).astype(int)
+        self.east_edge = max(self.point_array[:, 0]).astype(int)
+        self.north_edge= min(self.point_array[:, 1]).astype(int)
+        self.south_edge= max(self.point_array[:, 1]).astype(int)
+
+        self.h, self.w = self.south_edge - self.north_edge, self.east_edge - self.west_edge, 
+
+
+    def is_valid(self):
+        return self.w > 0 and self.h > 0
+
+    def __repr__(self):
+        return str((self.west_edge, self.east_edge, self.north_edge,
+                self.south_edge))
+
+    def __str__(self):
+        return '({:.2f}, {:.2f}, {:.2f}, {:.2f})'.format(self.west_edge,
+                    self.north_edge, self.east_edge, self.south_edge)
+
+
 class RegistrationQuadTree:
     """[summary]
 
@@ -119,7 +158,7 @@ class RegistrationQuadTree:
     def __init__(self, source_slide_path:Path, target_slide_path:Path, source_boundary:Rect=None, target_boundary:Rect=None,
                         depth=0, target_depth=1, thumbnail_size=(2048, 2048),
                         run_async=False, node_orientation:NodeOrientation = NodeOrientation.TOP,
-                        parent=None, homography:bool=True, filter_outliner:bool=False, num_workers:int=2, **kwargs):
+                        parent=None, homography:bool=True, filter_outliner:bool=False, num_workers:int=2, initial_rotation=None, **kwargs):
         """[summary]
         Init the current quadtree level
 
@@ -141,7 +180,8 @@ class RegistrationQuadTree:
 
 
         kwargs.update({"run_async":run_async, "thumbnail_size":thumbnail_size, "homography":homography, 
-                        "filter_outliner":filter_outliner, "target_depth":target_depth, "num_workers": num_workers})
+                        "filter_outliner":filter_outliner, "target_depth":target_depth, "num_workers": num_workers, 
+                        "initial_rotation": initial_rotation})
         
         self.kwargs = kwargs
         self.parent = parent
@@ -151,11 +191,15 @@ class RegistrationQuadTree:
         self.depth = depth
         self.target_depth = target_depth 
         self.num_workers = num_workers
+        self.initial_rotation = initial_rotation
         self.source_slide_path = source_slide_path if isinstance(source_slide_path, Path) else Path(source_slide_path)
         self.target_slide_path = target_slide_path if isinstance(target_slide_path, Path) else Path(target_slide_path)
 
         self._target_slide_dimensions = None
         self._source_slide_dimensions = None 
+
+        self._mpp_x_scale = 1
+        self._mpp_y_scale = 1
 
         self.source_boundary = source_boundary
         self.target_boundary = target_boundary 
@@ -173,7 +217,7 @@ class RegistrationQuadTree:
         # start timer
         tic = time.perf_counter()
 
-        if True: #self.run_async
+        if self.run_async: #self.run_async
             with concurrent.futures.ThreadPoolExecutor() as executor: # ProcessPoolExecutor  ThreadPoolExecutor
                 source_func = functools.partial(RegistrationQuadTree.get_region_thumbnail, slide_path=self.source_slide_path, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
                 target_func = functools.partial(RegistrationQuadTree.get_region_thumbnail, slide_path=self.target_slide_path, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
@@ -190,29 +234,19 @@ class RegistrationQuadTree:
         else:
             self.source_thumbnail, self.source_scale = RegistrationQuadTree.get_region_thumbnail(slide_path=self.source_slide_path, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
             self.target_thumbnail, self.target_scale = RegistrationQuadTree.get_region_thumbnail(slide_path=self.target_slide_path, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
+
+        # if the initial rotation angle is to big rotate the image to make the matching easyer 
+        inv_rotation_matrix = None
+        if self.initial_rotation is not None and int(self.initial_rotation) not in range(-12, 12): #tolerance of 5°            
+            inv_rotation_matrix = self.get_inv_rotation_matrix_from_angle(-self.initial_rotation, width=self.target_thumbnail.width, height=self.target_thumbnail.height)
+            # rotate image 
+            self.target_thumbnail = self.target_thumbnail.rotate(self.initial_rotation, fillcolor=(255, 0, 0), expand=True)
+            
+        self.ptsA, self.ptsB, self.matchedVis, self.mean_reg_error, self.sigma2, self.q, self.tf_param, self.mean_reg_error = self.perform_registration(self.source_thumbnail, self.target_thumbnail, source_scale=self.source_scale, target_scale=self.target_scale, inv_rotation_matrix=inv_rotation_matrix, **kwargs)
         
-        self.ptsA, self.ptsB, self.matchedVis = self.extract_matching_points(self.source_thumbnail, self.target_thumbnail, source_scale=self.source_scale, target_scale=self.target_scale, **kwargs)
-
-        if filter_outliner:
-            self.ptsA, self.ptsB, self.scale_factors = self.filter_outliner(self.ptsA, self.ptsB)
-        
-        if homography:
-            self.mean_reg_error, self.sigma2, self.q, self.tf_param = self._get_min_reg_error_hom(self.ptsA, self.ptsB)
-        else:
-            self.tf_param, self.sigma2, self.q = cpd.registration_cpd(self.ptsA, self.ptsB, 'affine')
-            self.mean_reg_error = np.linalg.norm(self.tf_param.transform(self.ptsA)-self.ptsB, axis=1).mean()
-
-            mean_reg_error, _, _, tf_param = self._get_min_reg_error_hom(self.ptsA, self.ptsB)
-
-            if self.mean_reg_error > mean_reg_error:
-                self.mean_reg_error = self.mean_reg_error
-                self.tf_param = tf_param
-
-
-        self.b = self.tf_param.b
-        self.t = self.tf_param.t
-        self.mpp_x_scale = self.tf_param.b[0][0]
-        self.mpp_y_scale = self.tf_param.b[1][1]
+        # invert rotation to get scale
+        M = self.get_homography@self.get_inv_rotation_matrix
+        self.mpp_x_scale, self.mpp_y_scale = M[0][0], M[1][1]
 
         self.max_points = len(self.ptsA)
         self.points = self.ptsA
@@ -227,14 +261,42 @@ class RegistrationQuadTree:
         toc = time.perf_counter()
         self.run_time = toc - tic
 
+    def perform_registration(self, source_thumbnail, target_thumbnail, source_scale, target_scale, filter_outliner, homography, inv_rotation_matrix=None, **kwargs):
 
-    def _get_min_reg_error_hom(self, ptsA, ptsB):
+        ptsA, ptsB, matchedVis = self.extract_matching_points(source_thumbnail, target_thumbnail, source_scale=source_scale, target_scale=target_scale, inv_rotation_matrix=inv_rotation_matrix, **kwargs)
+
+        if filter_outliner:
+            ptsA, ptsB, scale_factors = self.filter_outliner(ptsA, ptsB, homography)
+        
+        mean_reg_error, sigma2, q, tf_param = self.estimate_homography(ptsA, ptsB)
+
+        return ptsA, ptsB, matchedVis, mean_reg_error, sigma2, q, tf_param, mean_reg_error
+
+    @staticmethod
+    def estimate_homography(ptsA, ptsB, homography:bool=True):
+
+        if homography:
+            mean_reg_error, sigma2, q, tf_param = RegistrationQuadTree._get_min_reg_error_hom(ptsA, ptsB)
+        else:
+            tf_param, sigma2, q = cpd.registration_cpd(ptsA, ptsB, 'affine')
+            mean_reg_error = np.linalg.norm(tf_param.transform(ptsA)-ptsB, axis=1).mean()
+
+            mean_reg_error_temp, _, _, tf_param_temp = RegistrationQuadTree._get_min_reg_error_hom(ptsA, ptsB)
+
+            if mean_reg_error > mean_reg_error_temp:
+                mean_reg_error = mean_reg_error_temp
+                tf_param = tf_param_temp
+
+        return mean_reg_error, sigma2, q, tf_param
+
+    @staticmethod
+    def _get_min_reg_error_hom(ptsA, ptsB):
         mean_reg_error = 99999999
 
         tf_param = None
         for outline_filter in [0, cv2.RANSAC, cv2.RHO, cv2.LMEDS]:
-            homography, mask = cv2.findHomography(self.ptsA, self.ptsB, outline_filter) 
-            temp_tf_param = tf.AffineTransformation(homography[:2, :2], homography[:2, 2:].reshape(-1))
+            affine, mask = cv2.estimateAffine2D(ptsA, ptsB, outline_filter)
+            temp_tf_param = tf.AffineTransformation(affine[:2, :2], affine[:2, 2:].reshape(-1))
 
             temp_mean_reg_error = np.linalg.norm(temp_tf_param.transform(ptsA)-ptsB, axis=1).mean()
             if temp_mean_reg_error < mean_reg_error:
@@ -286,7 +348,6 @@ class RegistrationQuadTree:
         if self.se is not None: self.se.source_slide_dimensions = dimensions
         if self.sw is not None: self.sw.source_slide_dimensions = dimensions
 
-
     @property
     def target_slide_dimensions(self):
 
@@ -321,6 +382,79 @@ class RegistrationQuadTree:
     def target_name(self):
         return  self.target_slide_path.stem
         
+    @property
+    def mpp_x_scale(self): #get from rotated image
+        return self._mpp_x_scale
+
+    @mpp_x_scale.setter 
+    def mpp_x_scale(self, scale):
+        self._mpp_x_scale = scale
+
+    @property
+    def mpp_y_scale(self): #get from rotated image
+        return self._mpp_y_scale
+
+    @mpp_y_scale.setter 
+    def mpp_y_scale(self, scale):
+        self._mpp_y_scale = scale
+
+    @property
+    def get_homography(self):
+
+        H = np.identity(3)
+        H[:2, :2] = self.tf_param.b
+        H[:2, 2:] = self.tf_param.t.reshape(2,1)
+        return H
+
+    @property
+    def get_rotation_angle(self):
+
+        return - math.atan2(self.tf_param.b[0,1], self.tf_param.b[0,0]) * 180 / math.pi
+
+    @property
+    def get_rotation_matrix(self):
+
+        phi = self.get_rotation_angle * math.pi / 180
+        return np.array([[np.cos(phi), - np.sin(phi), 0],
+                                        [np.sin(phi), np.cos(phi), 0], 
+                                        [0., 0, 1]])
+
+    @property
+    def get_inv_rotation_matrix(self):
+
+        M = self.get_rotation_matrix
+        return inv(M)
+
+    @staticmethod
+    def get_rotation_matrix_from_angle(angle:float, width:int, height:int):
+
+        (cX, cY) = (width // 2, height // 2)
+        M = np.identity(3)
+        M = cv2.getRotationMatrix2D((cX, cY), -angle, 1.0)
+
+        cos = np.abs(M[0, 0])
+        sin = np.abs(M[0, 1])
+
+        nW = int((height * sin) + (width * cos))
+        nH = int((height * cos) + (width * sin))
+
+        M[0, 2] += (nW / 2) - cX
+        M[1, 2] += (nH / 2) - cY
+        
+        return M
+
+    @staticmethod
+    def get_inv_rotation_matrix_from_angle(angle:float, width:int, height:int):
+
+        M = RegistrationQuadTree.get_rotation_matrix_from_angle(angle, width=width, height=height)
+
+        H = np.identity(3)
+        H[:2, :2] = M[:2, :2]
+        H[:2, 2:] = M[:2, 2:]
+        H = inv(H)
+
+        return H[:2]
+
     def __str__(self):
         """Return a string representation of this node, suitably formatted."""
         sp = ' ' * self.depth * 2
@@ -345,26 +479,41 @@ class RegistrationQuadTree:
         source_w, source_h = self.source_boundary.w / 2, self.source_boundary.h / 2
 
         # transform target bounding box
+        # p1    p1h     p2 
+        #    nw     ne
+        # p4h   pc     p2h
+        #    sw     se
+        # p4    p3h    p3
+        west_edge, east_edge   = self.source_boundary.west_edge, self.source_boundary.east_edge
+        north_edge, south_edge = self.source_boundary.north_edge, self.source_boundary.south_edge
 
-        new_xmin, new_ymin = self.transform_boxes([(self.source_boundary.west_edge, self.source_boundary.north_edge, 50, 50)])[0][:2]
-        new_xmax, new_ymax = self.transform_boxes([(self.source_boundary.east_edge, self.source_boundary.south_edge, 50, 50)])[0][:2]
+        p1  = self.transform_boxes([(west_edge, north_edge, 50, 50)])[0][:2] # top left
+        p1h = self.transform_boxes([(west_edge + (east_edge-west_edge) / 2, north_edge, 50, 50)])[0][:2] # center top
 
+        p2 =  self.transform_boxes([(east_edge, north_edge, 50, 50)])[0][:2] # top right
+        p2h = self.transform_boxes([(east_edge, north_edge + (south_edge-north_edge) / 2, 50, 50)])[0][:2] # center right
+
+        p3 =  self.transform_boxes([(east_edge, south_edge, 50, 50)])[0][:2] # bottom right
+        p3h = self.transform_boxes([(west_edge + (east_edge-west_edge) / 2, south_edge, 50, 50)])[0][:2] # center bottom
+
+        p4 =  self.transform_boxes([(west_edge, south_edge, 50, 50)])[0][:2] # bottom left
+        p4h = self.transform_boxes([(west_edge, north_edge + (south_edge-north_edge) / 2, 50, 50)])[0][:2] # center left
+
+        pc = self.transform_boxes([(west_edge + (east_edge-west_edge) / 2, north_edge + (south_edge-north_edge) / 2, 50, 50)])[0][:2] # center
+        
         # set new box coordinates withhin old limits
-        new_ymin, new_xmin = max(new_ymin, 0), max(new_xmin, 0)
-        new_ymax, new_xmax = min(new_ymax, self.target_slide_dimensions[1]), min(new_xmax, self.target_slide_dimensions[0])
+        p1, p2, p3, p4 = [(max(p[0], 0), max(p[1], 0)) for p in [p1, p2, p3, p4]]
+        p1, p2, p3, p4 = [(min(p[0], self.target_slide_dimensions[0]), min(p[1], self.target_slide_dimensions[1])) for p in [p1, p2, p3, p4]]
 
-        # transform target center
-        target_cx, target_cy = self.transform_boxes([(self.source_boundary.cx, self.source_boundary.cy, 50, 50)])[0][:2]
-
-        # create target boxes
-        target_nw = Rect.create(Rect, new_xmin, new_ymin, target_cx - new_xmin, target_cy - new_ymin)
-        target_sw = Rect.create(Rect, new_xmin, target_cy, target_cx - new_xmin, new_ymax - target_cy)
-
-        target_ne = Rect.create(Rect, target_cx, new_ymin,  new_xmax - target_cx, target_cy - new_ymin)
-        target_se = Rect.create(Rect, target_cx, target_cy, new_xmax - target_cx, new_ymax - target_cy)
-
+        targetRotatedRect = RotatedRect(p1, p2, p3, p4)
 
         # create target boxes
+        target_nw = RotatedRect(p1=p1,  p2=p1h, p3=pc,  p4=p4h)
+        target_sw = RotatedRect(p1=p4h, p2=pc,  p3=p3h, p4=p4)
+        target_ne = RotatedRect(p1=p1h, p2=p2,  p3=p2h, p4=pc)
+        target_se = RotatedRect(p1=pc,  p2=p2h, p3=p3,  p4=p3h)
+
+        # create source boxes
         source_nw = Rect(source_cx - source_w/2, source_cy - source_h/2, source_w, source_h)
         source_sw = Rect(source_cx - source_w/2, source_cy + source_h/2, source_w, source_h)
 
@@ -423,24 +572,51 @@ class RegistrationQuadTree:
                     self.divided = True
 
                 except Exception as exc:
-                    print('%r generated an exception: %s' % (submitted[future], exc))
+                    print( f'generated an exception: {exc}')
 
-    def draw_feature_points(self, num_sub_pic:int=5, figsize=(16, 16)):
+    def draw_feature_points(self, num_sub_pic:int=5, figsize=(16, 16), patch_size:int=512):
         
         fig = plt.figure(constrained_layout=True, figsize=figsize)
         fig.suptitle(f'{self.source_name} --> {self.target_name}')
         gs = fig.add_gridspec(5, num_sub_pic)
 
-        f_ax_match = fig.add_subplot(gs[:2, :])
+        f_ax_match = fig.add_subplot(gs[:2, :3])
         f_ax_match.imshow(self.matchedVis)
 
         source_slide = openslide.open_slide(str(self.source_slide_path))
         target_slide = openslide.open_slide(str(self.target_slide_path))
 
         tf_temp = tf.AffineTransformation(self.tf_param.b, self.tf_param.t)
-        
+
+        # quiver plot
+        ptA_quiver = self.scale_points([(pt + (self.source_boundary.west_edge, self.source_boundary.north_edge)).astype(int) for pt in np.copy(self.ptsA)], self.source_scale, operator.truediv)
+        ptB_quiver = self.scale_points([(pt + (self.target_boundary.west_edge, self.target_boundary.north_edge)).astype(int) for pt in np.copy(self.ptsB)], self.target_scale, operator.truediv)
+
+        u_max = max(abs(ptA_quiver[:, 0] - ptB_quiver[:, 0] + 0.0001))
+        v_max = max(abs(ptA_quiver[:, 1] - ptB_quiver[:, 1] + 0.0001))
+
+        x, y = ptA_quiver[:, 0], ptA_quiver[:, 1]
+        u, v = (ptA_quiver[:, 0] - ptB_quiver[:, 0] + 0.0001) / u_max, (ptA_quiver[:, 1] - ptB_quiver[:, 1] + 0.0001) / v_max
+
+        quiver_plot = fig.add_subplot(gs[:2, 3])
+        quiver_plot.imshow(self.source_thumbnail)
+        quiver_plot.quiver(x, y, u, v) # , color=distance
+
+
+        xx = np.linspace(0, self.source_thumbnail.width, int(self.source_thumbnail.width / 20)) 
+        yy = np.linspace(0, self.source_thumbnail.height, int(self.source_thumbnail.height / 20)) 
+        xx, yy = np.meshgrid(xx, yy)
+
+        points = np.transpose(np.vstack((x, y)))
+        u_interp = interpolate.griddata(points, u, (xx, yy), method='cubic')
+        v_interp = interpolate.griddata(points, v, (xx, yy), method='cubic')
+
+        interpolated_plot = fig.add_subplot(gs[:2, 4])
+        interpolated_plot.imshow(self.source_thumbnail)
+        interpolated_plot.quiver(xx, yy, u_interp, v_interp) # , color=distance
+
         for idx, (pA, pB) in enumerate(zip(self.ptsA[:num_sub_pic].copy(), self.ptsB[:num_sub_pic].copy())):
-            size = 512
+            size = patch_size
 
             transformed = pA.copy()
             pA = (pA + (self.source_boundary.west_edge, self.source_boundary.north_edge)).astype(int)
@@ -457,25 +633,28 @@ class RegistrationQuadTree:
             if size > 0:
                 image_source = source_slide.read_region(location=pA_location, level=0, size=(size, size))
 
+            # rotate points
             pB_location = pB.astype(int) - (size_target_x // 2, size_target_y // 2)
-            if size_target_x > 0 and size_target_y > 0:
-                image_target = target_slide.read_region(location=pB_location, level=0, size=(size_target_x, size_target_y))
+            if size_target_x > 0 and size_target_y > 0:                
+                image_target = target_slide.read_region(location=pB_location, level=0, size=(size, size))
+                image_target = image_target.rotate(self.get_rotation_angle, fillcolor=(255, 255, 255), expand=True)
 
             trans_location = transformed - (size_target_x // 2, size_target_y // 2)
             if size_target_x > 0 and size_target_y > 0:
                 image_target_trans = target_slide.read_region(location=trans_location, level=0, size=(size_target_x, size_target_y))
+                image_target_trans = image_target_trans.rotate(self.get_rotation_angle, fillcolor=(255, 255, 255), expand=True)
 
-            ax = fig.add_subplot(gs[2, idx])
-            ax.set_title(f'Source:  {pA}')
-            ax.imshow(image_source)
+            ax_0 = fig.add_subplot(gs[2, idx])
+            ax_0.set_title(f'Source:  {pA}')
+            ax_0.imshow(image_source)
 
-            ax = fig.add_subplot(gs[3, idx])
-            ax.set_title(f'Trans:  {transformed}')
-            ax.imshow(image_target_trans)
+            ax_1 = fig.add_subplot(gs[3, idx])
+            ax_1.set_title(f'Trans:  {transformed}')
+            ax_1.imshow(image_target_trans)
 
-            ax = fig.add_subplot(gs[4, idx])
-            ax.set_title(f'GT:  {pB}')
-            ax.imshow(image_target)
+            ax_2 = fig.add_subplot(gs[4, idx])
+            ax_2.set_title(f'GT:  {pB}')
+            ax_2.imshow(image_target)
         
         if self.divided:
             sub_draws = []
@@ -696,6 +875,7 @@ class RegistrationQuadTree:
                     target_scale:[tuple]=[(1,1)],
                     point_extractor:callable="orb",
                     use_gray:bool=False, 
+                    inv_rotation_matrix=None,
                     **kwargs
                     ):
         kwargs.update({"debug":debug, "point_extractor":point_extractor, "use_gray":use_gray})
@@ -724,19 +904,26 @@ class RegistrationQuadTree:
             matchedVis = cv2.drawMatchesKnn(source_image, kpsA_ori, target_image, kpsB_ori, matches, 
                                     None,flags=cv2.DrawMatchesFlags_NOT_DRAW_SINGLE_POINTS)
             
-        ptsA, ptsB = [], []
+        # rotate points back to the original position
+        if inv_rotation_matrix is not None:
+            tf_angle_target_inv = tf.AffineTransformation(inv_rotation_matrix[:2, :2], inv_rotation_matrix[:2, 2:].reshape(-1))
+            kpsB = tf_angle_target_inv.transform(kpsB)
 
-        for ptA, ptB in zip(kpsA, kpsB):
+        ptsA, ptsB = self.scale_points(kpsA, source_scale, operator.mul), self.scale_points(kpsB, target_scale, operator.mul)
+        return ptsA, ptsB, matchedVis
+
+    def scale_points(self, kps, scale, op=operator.mul):
+
+        pts = []
+
+        for pt in np.copy(kps):
             # scale points 
-            for s_scale, t_scale in zip(source_scale, target_scale):
-                ptA *= s_scale 
-                ptB *= t_scale 
+            for s_scale in scale:
+                pt = op(pt, s_scale) 
 
-            ptsA.append(ptA)
-            ptsB.append(ptB)
+            pts.append(pt)
 
-        return np.array(ptsA), np.array(ptsB), matchedVis
-
+        return np.array(pts)
 
     @staticmethod
     def get_region_thumbnail(slide_path:Path, boundary:Rect, depth:int=0, size=(2048, 2048)):
