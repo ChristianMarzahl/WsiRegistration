@@ -208,11 +208,13 @@ class RegistrationQuadTree:
             source_slide = openslide.open_slide(str(source_slide_path))
             self._source_slide_dimensions = source_slide.dimensions
             self.source_boundary = Rect.create(Rect, 0, 0, source_slide.dimensions[0], source_slide.dimensions[1])
+            source_slide.close()
 
         if self.target_boundary == None: 
             target_slide = openslide.open_slide(str(target_slide_path))    
             self._target_slide_dimensions = target_slide.dimensions
             self.target_boundary = Rect.create(Rect, 0, 0, target_slide.dimensions[0], target_slide.dimensions[1])
+            target_slide.close()
 
         # start timer
         tic = time.perf_counter()
@@ -235,7 +237,7 @@ class RegistrationQuadTree:
             self.source_thumbnail, self.source_scale = RegistrationQuadTree.get_region_thumbnail(slide_path=self.source_slide_path, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
             self.target_thumbnail, self.target_scale = RegistrationQuadTree.get_region_thumbnail(slide_path=self.target_slide_path, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
 
-        # if the initial rotation angle is to big rotate the image to make the matching easyer 
+        # if the initial rotation angle is to big rotate the image to make the matching easier 
         inv_rotation_matrix = None
         if self.initial_rotation is not None and int(self.initial_rotation) not in range(-12, 12): #tolerance of 5°            
             inv_rotation_matrix = self.get_inv_rotation_matrix_from_angle(-self.initial_rotation, width=self.target_thumbnail.width, height=self.target_thumbnail.height)
@@ -293,15 +295,20 @@ class RegistrationQuadTree:
     def _get_min_reg_error_hom(ptsA, ptsB):
         mean_reg_error = 99999999
 
-        tf_param = None
-        for outline_filter in [0, cv2.RANSAC, cv2.RHO, cv2.LMEDS]:
-            affine, mask = cv2.estimateAffine2D(ptsA, ptsB, outline_filter)
-            temp_tf_param = tf.AffineTransformation(affine[:2, :2], affine[:2, 2:].reshape(-1))
+        affine = np.array([[1,0,0], [0,1,0], [0,0,1]])
+        tf_param = tf.AffineTransformation(affine[:2, :2], affine[:2, 2:].reshape(-1))
+        sigma2, q = -1, -1
+        if len(ptsA) >= 3:
+            for outline_filter in [0, cv2.RANSAC, cv2.RHO, cv2.LMEDS]:
+                affine, mask = cv2.estimateAffine2D(ptsA, ptsB, outline_filter)
 
-            temp_mean_reg_error = np.linalg.norm(temp_tf_param.transform(ptsA)-ptsB, axis=1).mean()
-            if temp_mean_reg_error < mean_reg_error:
-                mean_reg_error = temp_mean_reg_error
-                sigma2, q, tf_param = -1, -1, temp_tf_param
+                if affine is not None:
+                    temp_tf_param = tf.AffineTransformation(affine[:2, :2], affine[:2, 2:].reshape(-1))
+
+                    temp_mean_reg_error = np.linalg.norm(temp_tf_param.transform(ptsA)-ptsB, axis=1).mean()
+                    if temp_mean_reg_error < mean_reg_error:
+                        mean_reg_error = temp_mean_reg_error
+                        sigma2, q, tf_param = -1, -1, temp_tf_param
 
         return mean_reg_error, sigma2, q, tf_param
 
@@ -388,7 +395,7 @@ class RegistrationQuadTree:
 
     @mpp_x_scale.setter 
     def mpp_x_scale(self, scale):
-        self._mpp_x_scale = scale
+        self._mpp_x_scale = min(scale, 5)
 
     @property
     def mpp_y_scale(self): #get from rotated image
@@ -396,7 +403,7 @@ class RegistrationQuadTree:
 
     @mpp_y_scale.setter 
     def mpp_y_scale(self, scale):
-        self._mpp_y_scale = scale
+        self._mpp_y_scale = min(scale, 5)
 
     @property
     def get_homography(self):
@@ -589,31 +596,35 @@ class RegistrationQuadTree:
         tf_temp = tf.AffineTransformation(self.tf_param.b, self.tf_param.t)
 
         # quiver plot
-        ptA_quiver = self.scale_points([(pt + (self.source_boundary.west_edge, self.source_boundary.north_edge)).astype(int) for pt in np.copy(self.ptsA)], self.source_scale, operator.truediv)
-        ptB_quiver = self.scale_points([(pt + (self.target_boundary.west_edge, self.target_boundary.north_edge)).astype(int) for pt in np.copy(self.ptsB)], self.target_scale, operator.truediv)
+        try:
+            ptA_quiver = self.scale_points([(pt + (self.source_boundary.west_edge, self.source_boundary.north_edge)).astype(int) for pt in np.copy(self.ptsA)], self.source_scale, operator.truediv)
+            ptB_quiver = self.scale_points([(pt + (self.target_boundary.west_edge, self.target_boundary.north_edge)).astype(int) for pt in np.copy(self.ptsB)], self.target_scale, operator.truediv)
 
-        u_max = max(abs(ptA_quiver[:, 0] - ptB_quiver[:, 0] + 0.0001))
-        v_max = max(abs(ptA_quiver[:, 1] - ptB_quiver[:, 1] + 0.0001))
+            u_max = max(abs(ptA_quiver[:, 0] - ptB_quiver[:, 0] + 0.0001))
+            v_max = max(abs(ptA_quiver[:, 1] - ptB_quiver[:, 1] + 0.0001))
 
-        x, y = ptA_quiver[:, 0], ptA_quiver[:, 1]
-        u, v = (ptA_quiver[:, 0] - ptB_quiver[:, 0] + 0.0001) / u_max, (ptA_quiver[:, 1] - ptB_quiver[:, 1] + 0.0001) / v_max
+            x, y = ptA_quiver[:, 0], ptA_quiver[:, 1]
+            u, v = (ptA_quiver[:, 0] - ptB_quiver[:, 0] + 0.0001) / u_max, (ptA_quiver[:, 1] - ptB_quiver[:, 1] + 0.0001) / v_max
 
-        quiver_plot = fig.add_subplot(gs[:2, 3])
-        quiver_plot.imshow(self.source_thumbnail)
-        quiver_plot.quiver(x, y, u, v) # , color=distance
+            quiver_plot = fig.add_subplot(gs[:2, 3])
+            quiver_plot.imshow(self.source_thumbnail)
+            quiver_plot.quiver(x, y, u, v) # , color=distance
 
 
-        xx = np.linspace(0, self.source_thumbnail.width, int(self.source_thumbnail.width / 20)) 
-        yy = np.linspace(0, self.source_thumbnail.height, int(self.source_thumbnail.height / 20)) 
-        xx, yy = np.meshgrid(xx, yy)
+            xx = np.linspace(0, self.source_thumbnail.width, int(self.source_thumbnail.width / 20)) 
+            yy = np.linspace(0, self.source_thumbnail.height, int(self.source_thumbnail.height / 20)) 
+            xx, yy = np.meshgrid(xx, yy)
 
-        points = np.transpose(np.vstack((x, y)))
-        u_interp = interpolate.griddata(points, u, (xx, yy), method='cubic')
-        v_interp = interpolate.griddata(points, v, (xx, yy), method='cubic')
 
-        interpolated_plot = fig.add_subplot(gs[:2, 4])
-        interpolated_plot.imshow(self.source_thumbnail)
-        interpolated_plot.quiver(xx, yy, u_interp, v_interp) # , color=distance
+            points = np.transpose(np.vstack((x, y)))
+            u_interp = interpolate.griddata(points, u, (xx, yy), method='cubic')
+            v_interp = interpolate.griddata(points, v, (xx, yy), method='cubic')
+
+            interpolated_plot = fig.add_subplot(gs[:2, 4])
+            interpolated_plot.imshow(self.source_thumbnail)
+            interpolated_plot.quiver(xx, yy, u_interp, v_interp) # , color=distance
+        except Exception as inst:
+            print(inst)
 
         for idx, (pA, pB) in enumerate(zip(self.ptsA[:num_sub_pic].copy(), self.ptsB[:num_sub_pic].copy())):
             size = patch_size
@@ -656,6 +667,9 @@ class RegistrationQuadTree:
             ax_2.set_title(f'GT:  {pB}')
             ax_2.imshow(image_target)
         
+        source_slide.close()
+        target_slide.close()
+
         if self.divided:
             sub_draws = []
             if self.nw is not None: sub_draws.append(self.nw.draw_feature_points(num_sub_pic, figsize))
@@ -794,6 +808,8 @@ class RegistrationQuadTree:
                                  linewidth=3, edgecolor='m', facecolor='none')
             ax.add_patch(rect)
 
+        source_slide.close()
+        target_slide.close()
         
         if self.divided:
             sub_draws = []
@@ -878,7 +894,7 @@ class RegistrationQuadTree:
                     inv_rotation_matrix=None,
                     **kwargs
                     ):
-        kwargs.update({"debug":debug, "point_extractor":point_extractor, "use_gray":use_gray})
+        kwargs.update({"debug":debug, "point_extractor":point_extractor, "use_gray":use_gray, "inv_rotation_matrix":inv_rotation_matrix})
 
         source_scale = np.array(source_scale)
         target_scale = np.array(target_scale)
@@ -945,6 +961,8 @@ class RegistrationQuadTree:
         thumb.paste(tile, None, tile)
         thumb.thumbnail(size, Image.ANTIALIAS)
         scale.append(np.array([w, h]) / thumb.size)
+
+        slide.close()
 
         return thumb, scale
 

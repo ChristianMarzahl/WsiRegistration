@@ -131,3 +131,6 @@ dmypy.json
 
 .vscode/*
 tests/test_ccmct_pe.py
+tests/results/Anhir
+tests/results/breast
+tests/test_anhir.py
