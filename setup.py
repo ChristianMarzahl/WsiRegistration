@@ -20,7 +20,8 @@ setuptools.setup(
         'matplotlib', #>=3.3.4
         'scikit-learn', #>=0.24.1
         'probreg', #>=0.3.1
-        'pillow' # >=8.1.0
+        'pillow', # >=8.1.0
+        'scipy'
     ],
     classifiers=[
         "Programming Language :: Python :: 3",
