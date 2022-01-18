@@ -336,7 +336,6 @@ class RegistrationQuadTree:
     def target_thumbnail(self, thumbnail):
         self._target_thumbnail = thumbnail
 
-
     @property
     def source_slide_dimensions(self):
 
@@ -535,16 +534,16 @@ class RegistrationQuadTree:
         qt_functions = {}
         
         if source_nw.is_valid() and target_nw.is_valid():
-            qt_functions[NodeOrientation.NORTH_WEST] = functools.partial(RegistrationQuadTree, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_nw, target_boundary=target_nw,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_WEST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.NORTH_WEST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_nw, target_boundary=target_nw,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_WEST, parent=self, **self.kwargs)
 
         if source_ne.is_valid() and target_ne.is_valid():
-            qt_functions[NodeOrientation.NORTH_EAST] = functools.partial(RegistrationQuadTree, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_ne, target_boundary=target_ne,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_EAST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.NORTH_EAST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_ne, target_boundary=target_ne,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_EAST, parent=self, **self.kwargs)
 
         if source_se.is_valid() and target_se.is_valid():
-            qt_functions[NodeOrientation.SOUTH_EAST] = functools.partial(RegistrationQuadTree, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_se, target_boundary=target_se,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_EAST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.SOUTH_EAST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_se, target_boundary=target_se,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_EAST, parent=self, **self.kwargs)
 
         if source_sw.is_valid() and target_sw.is_valid():
-            qt_functions[NodeOrientation.SOUTH_WEST] = functools.partial(RegistrationQuadTree, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_sw, target_boundary=target_sw,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_WEST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.SOUTH_WEST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_sw, target_boundary=target_sw,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_WEST, parent=self, **self.kwargs)
 
         if self.run_async == True:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_workers) as executor: # ProcessPoolExecutor  ThreadPoolExecutor
@@ -671,15 +670,15 @@ class RegistrationQuadTree:
         target_slide.close()
 
         if self.divided:
-            sub_draws = []
-            if self.nw is not None: sub_draws.append(self.nw.draw_feature_points(num_sub_pic, figsize))
-            if self.ne is not None: sub_draws.append(self.ne.draw_feature_points(num_sub_pic, figsize))
-            if self.se is not None: sub_draws.append(self.se.draw_feature_points(num_sub_pic, figsize))
-            if self.sw is not None: sub_draws.append(self.sw.draw_feature_points(num_sub_pic, figsize))
+            figures = [fig]
+            if self.nw is not None: figures.append(self.nw.draw_feature_points(num_sub_pic, figsize)[0])
+            if self.ne is not None: figures.append(self.ne.draw_feature_points(num_sub_pic, figsize)[0])
+            if self.se is not None: figures.append(self.se.draw_feature_points(num_sub_pic, figsize)[0])
+            if self.sw is not None: figures.append(self.sw.draw_feature_points(num_sub_pic, figsize)[0])
 
-            return fig, sub_draws
+            return figures
         else:
-            return fig, None
+            return [fig]
 
 
     def filter_boxes(self, boxes):
@@ -970,6 +969,7 @@ class RegistrationQuadTree:
 
         attributes = self.__dict__.copy()
 
+        attributes["homography"] = self.get_homography
         attributes["source_slide_path"] = str(self.source_slide_path)
         attributes["target_slide_path"] = str(self.target_slide_path)
 
@@ -990,6 +990,6 @@ class RegistrationQuadTree:
         self.source_slide_path = Path(self.__dict__["source_slide_path"])
         self.target_slide_path = Path(self.__dict__["target_slide_path"])
 
-        self.tf_param = tf.AffineTransformation(self.__dict__["b"], self.__dict__["t"])
+        self.tf_param = tf.AffineTransformation(self.__dict__["homography"][:2, :2], self.__dict__["homography"][:2, 2:].reshape(-1))
 
 
