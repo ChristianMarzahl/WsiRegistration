@@ -1,6 +1,7 @@
 import itertools
 import pickle
 import math
+import random
 import time
 from enum import Enum
 from functools import wraps
@@ -9,6 +10,8 @@ from pathlib import Path
 import concurrent.futures
 import functools
 import operator
+
+from typing import Dict, Tuple, Sequence, List
 
 from numpy.linalg import inv
 import cv2
@@ -22,7 +25,15 @@ from PIL import Image
 from probreg import cpd
 from probreg import transformation as tf
 from sklearn.neighbors import LocalOutlierFactor
+from matplotlib.patches import Polygon
 from scipy import interpolate
+
+def extract_index_nparray(nparray):
+    index = None
+    for num in nparray[0]:
+        index = num
+        break
+    return index
 
 class NodeOrientation(Enum):
     """[summary]
@@ -53,12 +64,169 @@ class Point:
     def __str__(self):
         return 'P({:.2f}, {:.2f})'.format(self.x, self.y)
 
+    @property
+    def to_array(self):
+        return [self.x, self.y]
+
     def distance_to(self, other):
         try:
             other_x, other_y = other.x, other.y
         except AttributeError:
             other_x, other_y = other
         return np.hypot(self.x - other_x, self.y - other_y)
+
+
+class Triangle():
+
+    def __init__(self, p1:Point, p2:Point, p3:Point) -> None:
+
+        self.pt1 = p1
+        self.pt2 = p2
+        self.pt3 = p3
+        
+    def draw(self, ax, c='k', lw=1, **kwargs):
+
+        pts = np.array([[self.pt1.x, self.pt1.y], [self.pt2.x, self.pt2.y], [self.pt3.x, self.pt3.y]])
+        p = Polygon(pts, closed=False, fc=[1,0,0, 0.05], ec=(0,0,0,1), lw=lw)
+        #ax = plt.gca()
+        ax.add_patch(p)        
+
+    @property
+    def area(self) -> float:
+
+        # calc the lenght of each side
+        a = self.pt1.distance_to(self.pt2)
+        b = self.pt1.distance_to(self.pt3)
+        c = self.pt2.distance_to(self.pt3)
+
+        s = (a + b + c) / 2
+        return (s*(s-a)*(s-b)*(s-c)) ** 0.5
+
+    @property
+    def points(self):
+        return np.array([[self.pt1.x, self.pt1.y], [self.pt2.x, self.pt2.y], [self.pt3.x, self.pt3.y]])
+
+    def _sign(self, p1:Point, p2:Point, p3:Point) -> bool:
+    
+        return (p1.x - p3.x) * (p2.y - p3.y) - (p2.x - p3.x) * (p1.y - p3.y)
+    
+
+    def contains(self, pt:Point) -> bool:
+        # https://stackoverflow.com/a/2049593
+        if type(pt) is not Point:
+            pt = Point(*pt)
+
+        d1 = self._sign(pt, self.pt1, self.pt2)
+        d2 = self._sign(pt, self.pt2, self.pt3)
+        d3 = self._sign(pt, self.pt3, self.pt1)
+
+        has_neg = (d1 < 0) or (d2 < 0) or (d3 < 0)
+        has_pos = (d1 > 0) or (d2 > 0) or (d3 > 0)
+
+        return not(has_neg and has_pos)
+
+class TriangleRegistrationPair:
+
+    def __init__(self, source:Triangle, target:Triangle, homography:bool=True) -> None:
+
+        self.source = source
+        self.target = target
+        self.error = -1
+        self.error_inv = -1
+
+        _, _, _, self.tf_param = RegistrationQuadTree.estimate_homography(source.points, target.points, homography)
+        self.tf_param_inv = tf.AffineTransformation(self.get_homography_inv[:2, :2], self.get_homography_inv[:2, 2:].reshape(-1))
+
+
+    def contains(self, pt:Point):
+
+        return self.source.contains(pt)
+
+    def target_contains(self, pt:Point):
+
+        return self.target.contains(pt)
+
+    def get_reg_error(self, ptsA, ptsB):
+
+        self.error = np.linalg.norm(self.tf_param.transform(ptsA)-ptsB, axis=1).mean() 
+        return self.error
+
+    def get_reg_error_inv(self, ptsA, ptsB):
+
+        self.error_inv = np.linalg.norm(self.tf_param_inv.transform(ptsA)-ptsB, axis=1).mean()
+        return self.error_inv
+
+    @property
+    def get_homography(self):
+
+        H = np.identity(3)
+        H[:2, :2] = self.tf_param.b
+        H[:2, 2:] = self.tf_param.t.reshape(2,1)
+        return H
+
+    @property
+    def get_homography_inv(self):
+
+        H = self.get_homography
+        if (cv2.determinant(H) != 0.0):
+            return inv(H)
+        else:
+            return np.array([[1., 0., -H[0,-1]],
+                          [0., 1., -H[1,-1]],
+                          [0., 0., 0.]])
+
+
+    @property
+    def get_dict_representation(self):
+
+        H = self.get_homography
+        H_inv = self.get_homography_inv
+        
+        representation = {
+            "t_00":H[0,0], "t_01":H[0,1], "t_02":H[0,2],
+            "t_10":H[1,0], "t_11":H[1,1], "t_12":H[1,2],
+            "t_20":H[2,0], "t_21":H[2,1], "t_22":H[2,2],
+
+            "t_00_inv":H_inv[0,0], "t_01_inv":H_inv[0,1], "t_02_inv":H_inv[0,2],
+            "t_10_inv":H_inv[1,0], "t_11_inv":H_inv[1,1], "t_12_inv":H_inv[1,2],
+            "t_20_inv":H_inv[2,0], "t_21_inv":H_inv[2,1], "t_22_inv":H_inv[2,2],
+
+            "source": {
+                "p1": {"x": int(self.source.pt1.x), "y": int(self.source.pt1.y)},
+                "p2": {"x": int(self.source.pt2.x), "y": int(self.source.pt2.y)},
+                "p3": {"x": int(self.source.pt3.x), "y": int(self.source.pt3.y)},
+            },
+
+            "target": {
+                "p1": {"x": int(self.target.pt1.x), "y": int(self.target.pt1.y)},
+                "p2": {"x": int(self.target.pt2.x), "y": int(self.target.pt2.y)},
+                "p3": {"x": int(self.target.pt3.x), "y": int(self.target.pt3.y)},
+            },
+        }
+
+
+        return representation
+
+
+    def __getstate__(self):
+
+        attributes = self.__dict__.copy()
+
+        attributes["homography"] = self.get_homography
+        attributes["homography_inv"] = self.get_homography_inv
+
+        del attributes['tf_param']
+        del attributes['tf_param_inv']
+        return attributes
+
+    def __setstate__(self, state):
+
+        self.__dict__ = state
+
+        self.tf_param = tf.AffineTransformation(self.__dict__["homography"][:2, :2], self.__dict__["homography"][:2, 2:].reshape(-1))
+        self.tf_param_inv = tf.AffineTransformation(self.__dict__["homography_inv"][:2, :2], self.__dict__["homography_inv"][:2, 2:].reshape(-1))
+
+
 
 class Rect:
     """A rectangle centred at (cx, cy) with width w and height h."""
@@ -68,6 +236,12 @@ class Rect:
         self.w, self.h = w, h
         self.west_edge, self.east_edge = cx - w/2, cx + w/2
         self.north_edge, self.south_edge = cy - h/2, cy + h/2
+
+
+    @property
+    def rect_repr(self):
+        return (int(self.west_edge), int(self.north_edge), int(self.w), int(self.h))
+        #return (self.p1[0], self.p1[1], self.w, self.h)
 
     def __repr__(self):
         return str((self.west_edge, self.east_edge, self.north_edge,
@@ -87,7 +261,7 @@ class Rect:
         return self.w > 0 and self.h > 0
 
 
-    def contains(self, point):
+    def contains(self, point:Point):
         """Is point (a Point object or (x,y) tuple) inside this Rect?"""
 
         try:
@@ -96,9 +270,15 @@ class Rect:
             point_x, point_y = point
 
         return (point_x >= self.west_edge and
-                point_x <  self.east_edge and
+                point_x <=  self.east_edge and
                 point_y >= self.north_edge and
-                point_y < self.south_edge)
+                point_y <= self.south_edge)
+
+
+    def contains_traingle(self, traingle:Triangle):
+
+        return self.contains(traingle.pt1) and self.contains(traingle.pt2) and self.contains(traingle.pt3)
+
 
     def intersects(self, other):
         """Does Rect object other interesect this Rect?"""
@@ -107,10 +287,42 @@ class Rect:
                     other.north_edge > self.south_edge or
                     other.south_edge < self.north_edge)
 
+    def get_line_intersection(self, p1:Point, p2:Point):
+        """ 
+        Returns the point of intersection of the lines passing through a2,a1 and the rectangle.
+        p1: [x, y] a point on the first line
+        p2: [x, y] another point on the first line
+        """
+
+        wn_ws = (Point(x=self.west_edge, y=self.north_edge), Point(x=self.west_edge, y=self.south_edge))
+        es_ws = (Point(x=self.east_edge, y=self.south_edge), Point(x=self.west_edge, y=self.south_edge))
+
+        en_wn = (Point(x=self.east_edge, y=self.north_edge), Point(x=self.west_edge, y=self.north_edge))
+        en_ws = (Point(x=self.east_edge, y=self.north_edge), Point(x=self.east_edge, y=self.south_edge))
+
+
+        intersection_points = []
+        for rp1, rp2 in [wn_ws, es_ws, en_wn, en_ws]:
+            s = np.vstack([p1.to_array, p2.to_array, rp1.to_array,rp2.to_array])        # s for stacked
+            h = np.hstack((s, np.ones((4, 1)))) # h for homogeneous
+            l1 = np.cross(h[0], h[1])           # get first line
+            l2 = np.cross(h[2], h[3])           # get second line
+            x, y, z = np.cross(l1, l2)          # point of intersection
+            if z != 0: # lines are not parallel
+                p = Point(x=x/z, y=y/z)
+                if self.contains(p):# check that the point is a the border of the rectangle
+                    # check if the point is between the two points p1 and p2
+                    if Rect.create(Rect, x=min(p1.x, p1.x), y=min(p1.y, p1.y), w=abs(p1.x-p2.x), h=abs(p1.y-p2.y)).contains(p):
+                        intersection_points.append((p, p1, p2))
+
+        return intersection_points
+
+
     def draw(self, ax, c='k', lw=1, **kwargs):
         x1, y1 = self.west_edge, self.north_edge
         x2, y2 = self.east_edge, self.south_edge
         ax.plot([x1,x2,x2,x1,x1],[y1,y1,y2,y2,y1], c=c, lw=lw, **kwargs)
+
 
 
 class RotatedRect:
