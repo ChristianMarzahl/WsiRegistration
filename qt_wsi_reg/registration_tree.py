@@ -625,6 +625,17 @@ class RegistrationQuadTree:
         return H
 
     @property
+    def get_homography_inv(self):
+
+        H = self.get_homography
+        if (cv2.determinant(H) != 0.0):
+            return inv(H)
+        else:
+            return np.array([[1., 0., -H[0,-1]],
+                          [0., 1., -H[1,-1]],
+                          [0., 0., 0.]])
+
+    @property
     def get_rotation_angle(self):
 
         return - math.atan2(self.tf_param.b[0,1], self.tf_param.b[0,0]) * 180 / math.pi
@@ -1176,6 +1187,36 @@ class RegistrationQuadTree:
         slide.close()
 
         return thumb, scale
+
+    @property
+    def get_dict_representation(self):
+
+        H = self.get_homography
+        H_inv = self.get_homography_inv
+
+        representation = {
+            "t_00":H[0,0], "t_01":H[0,1], "t_02":H[0,2],
+            "t_10":H[1,0], "t_11":H[1,1], "t_12":H[1,2],
+            "t_20":H[2,0], "t_21":H[2,1], "t_22":H[2,2],
+
+            "t_00_inv":H_inv[0,0], "t_01_inv":H_inv[0,1], "t_02_inv":H_inv[0,2],
+            "t_10_inv":H_inv[1,0], "t_11_inv":H_inv[1,1], "t_12_inv":H_inv[1,2],
+            "t_20_inv":H_inv[2,0], "t_21_inv":H_inv[2,1], "t_22_inv":H_inv[2,2],
+
+            "x_min": self.source_boundary.west_edge,
+            "y_min": self.source_boundary.north_edge,
+            "x_max": self.source_boundary.east_edge,
+            "y_max": self.source_boundary.south_edge,
+
+            "ne": self.ne.get_dict_representation if self.ne is not None else None ,
+            "se": self.se.get_dict_representation if self.se is not None else None ,
+            "nw": self.nw.get_dict_representation if self.nw is not None else None ,
+            "sw": self.sw.get_dict_representation if self.sw is not None else None ,
+        }
+
+
+        return representation
+
 
     def __getstate__(self):
 
