@@ -5,7 +5,7 @@ with open("README.md", "r") as fh:
 
 setuptools.setup(
     name="qt-wsi-registration", 
-    version="0.0.11",
+    version="0.0.12",
     author="Christian Marzahl",
     author_email="christian.marzahl@gamil.com",
     description="Robust quad-tree based registration on whole slide images",
@@ -19,7 +19,7 @@ setuptools.setup(
         'openslide-python', #>=1.1.2
         'matplotlib', #>=3.3.4
         'scikit-learn', #>=0.24.1
-        'probreg', #>=0.3.1
+        'probreg==0.3.5', #>=0.3.1
         'pillow', # >=8.1.0
         'scipy'
     ],
