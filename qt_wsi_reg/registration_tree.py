@@ -1181,7 +1181,7 @@ class RegistrationQuadTree:
 
         thumb = Image.new('RGB', tile.size, '#ffffff')
         thumb.paste(tile, None, tile)
-        thumb.thumbnail(size, Image.ANTIALIAS)
+        thumb.thumbnail(size, Image.LANCZOS)
         scale.append(np.array([w, h]) / thumb.size)
 
         slide.close()
