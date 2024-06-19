@@ -14,13 +14,13 @@ setuptools.setup(
     url="https://github.com/ChristianMarzahl/WsiRegistration",
     packages=setuptools.find_packages(),
     install_requires=[
-        'numpy<2', #<2
-        'opencv-python', # >=4.5.1.48
+        'numpy', # >=1.26.4
+        'opencv-python', # >=4.10.0.84
         'openslide-python', #>=1.1.2
         'matplotlib', #>=3.3.4
         'scikit-learn', #>=0.24.1
         'probreg==0.3.5', #>=0.3.1
-        'pillow>10', # >10
+        'pillow', # >=10.3.0
         'scipy'
     ],
     classifiers=[
