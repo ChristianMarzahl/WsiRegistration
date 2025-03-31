@@ -1,4 +1,5 @@
 import itertools
+import pathlib
 import pickle
 import math
 import random
@@ -27,6 +28,35 @@ from probreg import transformation as tf
 from sklearn.neighbors import LocalOutlierFactor
 from matplotlib.patches import Polygon
 from scipy import interpolate
+
+class OpenSlideWrapper(openslide.OpenSlide):
+    def __init__(self, slide_path):
+        super().__init__(slide_path)
+        self.slide_path = slide_path  # Store path for later reconstruction
+    
+    def __reduce__(self):
+        # Define how to pickle the object
+        return (self.__class__, (self.slide_path,))
+    
+class ImageSlideWrapper(openslide.ImageSlide):
+    def __init__(self, slide_path):
+        super().__init__(slide_path)
+        self.slide_path = slide_path  # Store path for later reconstruction
+    
+    def __reduce__(self):
+        # Define how to pickle the object
+        return (self.__class__, (self.slide_path,))
+
+
+def open_slide(filename):
+    """Open a whole-slide or regular image.
+
+    Return an OpenSlide object for whole-slide images and an ImageSlide
+    object for other types of images."""
+    try:
+        return OpenSlideWrapper(filename)
+    except openslide.OpenSlideUnsupportedFormatError:
+        return ImageSlideWrapper(filename)
 
 def extract_index_nparray(nparray):
     index = None
@@ -367,16 +397,18 @@ class RegistrationQuadTree:
 
     """
 
-    def __init__(self, source_slide_path:Path, target_slide_path:Path, source_boundary:Rect=None, target_boundary:Rect=None,
+    def __init__(self, source_slide_path:Path=None, target_slide_path:Path=None, source_boundary:Rect=None, target_boundary:Rect=None,
                         depth=0, target_depth=1, thumbnail_size=(2048, 2048),
                         run_async=False, node_orientation:NodeOrientation = NodeOrientation.TOP,
-                        parent=None, homography:bool=True, filter_outliner:bool=False, num_workers:int=2, initial_rotation=None, **kwargs):
+                        parent=None, homography:bool=True, filter_outliner:bool=False, num_workers:int=2, initial_rotation=None, source_slide:openslide.OpenSlide=None,target_slide:openslide.OpenSlide=None, **kwargs):
         """[summary]
         Init the current quadtree level
 
         Args:
             source_slide_path ([Path]): [source slide path as Path object]
             target_slide_path ([Path]): [target slide path as Path object]
+            source_slide ([openslide.OpenSlide]): [source slide path as OpenSlide object]
+            target_slide ([openslide.OpenSlide]): [target slide path as OpenSlide object]
             source_boundary ([Rect]): [source wsi region of interest]
             target_boundary ([Rect]): [target wsi region of interest]
             depth (int, optional): [current depth]. Defaults to 0.
@@ -404,8 +436,20 @@ class RegistrationQuadTree:
         self.target_depth = target_depth 
         self.num_workers = num_workers
         self.initial_rotation = initial_rotation
-        self.source_slide_path = source_slide_path if isinstance(source_slide_path, Path) else Path(source_slide_path)
-        self.target_slide_path = target_slide_path if isinstance(target_slide_path, Path) else Path(target_slide_path)
+
+        if (source_slide is None) and (source_slide_path is None):
+            raise ValueError('Either source_slide or source_slide_path need to be set.')
+        if not source_slide_path is None and not isinstance(source_slide_path,str) and not isinstance(source_slide_path, pathlib.PurePath):
+            raise ValueError('source_slide_path needs to be either str or Path type.')
+        if (source_slide is None):
+            self.source_slide_path = Path(source_slide_path) if isinstance(source_slide_path, str) else source_slide_path
+
+        if (target_slide is None) and (target_slide_path is None):
+            raise ValueError('Either source_slide or source_slide_path need to be set.')
+        if not target_slide_path is None and not isinstance(target_slide_path,str) and not isinstance(target_slide_path, pathlib.PurePath):
+            raise ValueError('target_slide_path needs to be either str or Path type.')
+        if (target_slide is None):            
+            self.target_slide_path = Path(target_slide_path) if isinstance(target_slide_path, str) else target_slide_path
 
         self._target_slide_dimensions = None
         self._source_slide_dimensions = None 
@@ -416,25 +460,28 @@ class RegistrationQuadTree:
         self.source_boundary = source_boundary
         self.target_boundary = target_boundary 
         
+        if source_slide is None:
+            source_slide = open_slide(str(source_slide_path))
+        self.source_slide = source_slide
+
         if self.source_boundary == None: 
-            source_slide = openslide.open_slide(str(source_slide_path))
             self._source_slide_dimensions = source_slide.dimensions
             self.source_boundary = Rect.create(Rect, 0, 0, source_slide.dimensions[0], source_slide.dimensions[1])
-            source_slide.close()
 
+        if target_slide is None:
+            target_slide = open_slide(str(target_slide_path))    
+        self.target_slide = target_slide
         if self.target_boundary == None: 
-            target_slide = openslide.open_slide(str(target_slide_path))    
             self._target_slide_dimensions = target_slide.dimensions
             self.target_boundary = Rect.create(Rect, 0, 0, target_slide.dimensions[0], target_slide.dimensions[1])
-            target_slide.close()
 
         # start timer
         tic = time.perf_counter()
 
         if self.run_async: #self.run_async
             with concurrent.futures.ThreadPoolExecutor() as executor: # ProcessPoolExecutor  ThreadPoolExecutor
-                source_func = functools.partial(RegistrationQuadTree.get_region_thumbnail, slide_path=self.source_slide_path, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
-                target_func = functools.partial(RegistrationQuadTree.get_region_thumbnail, slide_path=self.target_slide_path, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
+                source_func = functools.partial(RegistrationQuadTree.get_region_thumbnail, slide=self.source_slide, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
+                target_func = functools.partial(RegistrationQuadTree.get_region_thumbnail, slide=self.target_slide, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
 
                 submitted = {executor.submit(func) : area  for func, area in zip([source_func, target_func], ["source", "target"])}
                 for future in concurrent.futures.as_completed(submitted):
@@ -446,8 +493,8 @@ class RegistrationQuadTree:
                     except Exception as exc:
                         print('%r generated an exception: %s' % (submitted[future], exc))
         else:
-            self.source_thumbnail, self.source_scale = RegistrationQuadTree.get_region_thumbnail(slide_path=self.source_slide_path, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
-            self.target_thumbnail, self.target_scale = RegistrationQuadTree.get_region_thumbnail(slide_path=self.target_slide_path, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
+            self.source_thumbnail, self.source_scale = RegistrationQuadTree.get_region_thumbnail(slide=self.source_slide, boundary=self.source_boundary, depth=self.depth + 1, size=self.thumbnail_size)
+            self.target_thumbnail, self.target_scale = RegistrationQuadTree.get_region_thumbnail(slide=self.target_slide, boundary=self.target_boundary, depth=self.depth + 1, size=self.thumbnail_size)
 
         # if the initial rotation angle is to big rotate the image to make the matching easier 
         inv_rotation_matrix = None
@@ -552,7 +599,7 @@ class RegistrationQuadTree:
     def source_slide_dimensions(self):
 
         if self._source_slide_dimensions is None:
-            self.source_slide_dimensions = openslide.open_slide(str(self.source_slide_path)).dimensions
+            self.source_slide_dimensions = self.source_slide.dimensions
         
         return self._source_slide_dimensions
 
@@ -570,7 +617,7 @@ class RegistrationQuadTree:
     def target_slide_dimensions(self):
 
         if self._target_slide_dimensions is None:
-            self._target_slide_dimensions = openslide.open_slide(str(self.target_slide_path)).dimensions
+            self._target_slide_dimensions = self.target_slide.dimensions
         
         return self._target_slide_dimensions
 
@@ -586,19 +633,29 @@ class RegistrationQuadTree:
 
     @property
     def source_path(self):
-        return self.source_slide_path
+        if hasattr(self.source_slide, '_filename'):
+            return Path(self.source_slide._filename)
+        elif hasattr(self.source_slide, '_image'):
+            return Path(self.source_slide._image.filename)
+        else:
+            raise NotImplementedError('Missing _filename property in OpenSlide object source.')
             
     @property
     def target_path(self):
-        return self.target_slide_path
+        if hasattr(self.target_slide, '_filename'):
+            return Path(self.target_slide._filename)
+        elif hasattr(self.target_slide, '_image'):
+            return Path(self.target_slide._image.filename)
+        else:
+            raise NotImplementedError('Missing _filename property in OpenSlide object target.')
 
     @property
     def source_name(self):
-        return self.source_slide_path.stem
+        return self.source_path.stem
             
     @property
     def target_name(self):
-        return  self.target_slide_path.stem
+        return  self.target_path.stem
         
     @property
     def mpp_x_scale(self): #get from rotated image
@@ -757,16 +814,16 @@ class RegistrationQuadTree:
         qt_functions = {}
         
         if source_nw.is_valid() and target_nw.is_valid():
-            qt_functions[NodeOrientation.NORTH_WEST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_nw, target_boundary=target_nw,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_WEST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.NORTH_WEST] = functools.partial(self.__class__, source_slide=self.source_slide, target_slide=self.target_slide, source_boundary=source_nw, target_boundary=target_nw,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_WEST, parent=self, **self.kwargs)
 
         if source_ne.is_valid() and target_ne.is_valid():
-            qt_functions[NodeOrientation.NORTH_EAST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_ne, target_boundary=target_ne,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_EAST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.NORTH_EAST] = functools.partial(self.__class__, source_slide=self.source_slide, target_slide=self.target_slide, source_boundary=source_ne, target_boundary=target_ne,  depth=self.depth + 1, node_orientation=NodeOrientation.NORTH_EAST, parent=self, **self.kwargs)
 
         if source_se.is_valid() and target_se.is_valid():
-            qt_functions[NodeOrientation.SOUTH_EAST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_se, target_boundary=target_se,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_EAST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.SOUTH_EAST] = functools.partial(self.__class__, source_slide=self.source_slide, target_slide=self.target_slide, source_boundary=source_se, target_boundary=target_se,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_EAST, parent=self, **self.kwargs)
 
         if source_sw.is_valid() and target_sw.is_valid():
-            qt_functions[NodeOrientation.SOUTH_WEST] = functools.partial(self.__class__, source_slide_path=self.source_slide_path, target_slide_path=self.target_slide_path, source_boundary=source_sw, target_boundary=target_sw,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_WEST, parent=self, **self.kwargs)
+            qt_functions[NodeOrientation.SOUTH_WEST] = functools.partial(self.__class__, source_slide=self.source_slide, target_slide=self.target_slide, source_boundary=source_sw, target_boundary=target_sw,  depth=self.depth + 1, node_orientation=NodeOrientation.SOUTH_WEST, parent=self, **self.kwargs)
 
         if self.run_async == True:
             with concurrent.futures.ThreadPoolExecutor(max_workers=self.num_workers) as executor: # ProcessPoolExecutor  ThreadPoolExecutor
@@ -812,8 +869,8 @@ class RegistrationQuadTree:
         f_ax_match = fig.add_subplot(gs[:2, :3])
         f_ax_match.imshow(self.matchedVis)
 
-        source_slide = openslide.open_slide(str(self.source_slide_path))
-        target_slide = openslide.open_slide(str(self.target_slide_path))
+        source_slide = self.source_slide
+        target_slide = self.target_slide
 
         tf_temp = tf.AffineTransformation(self.tf_param.b, self.tf_param.t)
 
@@ -889,8 +946,6 @@ class RegistrationQuadTree:
             ax_2.set_title(f'GT:  {pB}')
             ax_2.imshow(image_target)
         
-        source_slide.close()
-        target_slide.close()
 
         if self.divided:
             figures = [fig]
@@ -986,8 +1041,8 @@ class RegistrationQuadTree:
         f_ax_match = fig.add_subplot(gs[:2, :])
         f_ax_match.imshow(self.matchedVis)
 
-        source_slide = openslide.open_slide(str(self.source_slide_path))
-        target_slide = openslide.open_slide(str(self.target_slide_path))
+        source_slide = self.source_slide
+        target_slide = self.target_slide
         
         for idx, (source_box, target_box)  in enumerate(zip(source_boxes[:num_sub_pic], target_boxes[:num_sub_pic])):
             size = 512
@@ -1030,8 +1085,6 @@ class RegistrationQuadTree:
                                  linewidth=3, edgecolor='m', facecolor='none')
             ax.add_patch(rect)
 
-        source_slide.close()
-        target_slide.close()
         
         if self.divided:
             sub_draws = []
@@ -1164,11 +1217,10 @@ class RegistrationQuadTree:
         return np.array(pts)
 
     @staticmethod
-    def get_region_thumbnail(slide_path:Path, boundary:Rect, depth:int=0, size=(2048, 2048)):
+    def get_region_thumbnail(slide:openslide.OpenSlide, boundary:Rect, depth:int=0, size=(2048, 2048)):
 
         scale = []
 
-        slide = openslide.open_slide(str(slide_path))
         downsample = max(*[dim / thumb for dim, thumb in zip((boundary.w, boundary.h), (size[0] * depth, size[1] * depth))])        
         level = slide.get_best_level_for_downsample(downsample)
 
@@ -1184,7 +1236,6 @@ class RegistrationQuadTree:
         thumb.thumbnail(size, Image.LANCZOS)
         scale.append(np.array([w, h]) / thumb.size)
 
-        slide.close()
 
         return thumb, scale
 
@@ -1223,8 +1274,8 @@ class RegistrationQuadTree:
         attributes = self.__dict__.copy()
 
         attributes["homography"] = self.get_homography
-        attributes["source_slide_path"] = str(self.source_slide_path)
-        attributes["target_slide_path"] = str(self.target_slide_path)
+        attributes["source_slide"] = self.source_slide
+        attributes["target_slide"] = self.target_slide
 
         del attributes['matchedVis']
         del attributes['_source_thumbnail']
@@ -1240,8 +1291,8 @@ class RegistrationQuadTree:
         self._target_thumbnail = None
         self.matchedVis = None
 
-        self.source_slide_path = Path(self.__dict__["source_slide_path"])
-        self.target_slide_path = Path(self.__dict__["target_slide_path"])
+        self.source_slide = self.__dict__["source_slide"]
+        self.target_slide = self.__dict__["target_slide"]
 
         self.tf_param = tf.AffineTransformation(self.__dict__["homography"][:2, :2], self.__dict__["homography"][:2, 2:].reshape(-1))
 

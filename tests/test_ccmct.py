@@ -81,6 +81,21 @@ class TestRegistrationMethods(unittest.TestCase):
             qtree = registration.RegistrationQuadTree(source_slide_path=soure_path, target_slide_path=targert_path, **self.parameters)
             print(str(qtree))
 
+    def test_openSlideObject(self):
+        slide_paths = {source : target for source, target in 
+                        zip(Path(r"examples/4Scanner/Aperio/CCMCT").glob("*.svs"), 
+                        Path(r"examples/4Scanner/NanoZoomerS210/CCMCT").glob("*.ndpi"))}
+
+        for source_path, target_slide in slide_paths.items():
+
+            source_slide = OpenSlide(str(source_path))
+            target_slide = OpenSlide(str(target_slide))
+            qtree = registration.RegistrationQuadTree(source_slide=source_slide, target_slide=target_slide, **self.parameters)
+            print(str(qtree))
+
+
+
+
 
 if __name__ == '__main__':
 

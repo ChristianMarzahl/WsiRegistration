@@ -49,11 +49,11 @@ class TestRegistrationMethods(unittest.TestCase):
                         zip(Path(r"examples/4Scanner/Aperio/Cyto").glob("*.svs"), 
                         Path(r"examples/4Scanner/Aperio/Cyto").glob("*.svs"))}
 
-        for soure_path, targert_path in slide_paths.items():
+        for source_path, target_path in slide_paths.items():
 
-            qtree = registration.RegistrationQuadTree(source_slide_path=soure_path, target_slide_path=targert_path, **self.parameters)
-            l0_fig, _ = qtree.draw_feature_points(num_sub_pic=5, figsize=(10, 10))
-            l0_fig.savefig(self.pic_results / f'{soure_path.stem}-{targert_path.stem}.png')  
+            qtree = registration.RegistrationQuadTree(source_slide_path=source_path, target_slide_path=target_path, **self.parameters)
+            l0_fig = qtree.draw_feature_points(num_sub_pic=5, figsize=(10, 10))[0]
+            l0_fig.savefig(self.pic_results / f'{source_path.stem}-{target_path.stem}.png')  
 
 
     def test_pickle(self):
@@ -69,8 +69,9 @@ class TestRegistrationMethods(unittest.TestCase):
             pickle.dump(qtree, handle, protocol=pickle.DEFAULT_PROTOCOL)
 
 
-        new_qt = pickle.load(open(str(self.pickle_path), "rb" ))
-        result_qt_str = str(new_qt)
+        with open(str(self.pickle_path), "rb") as f:
+            new_qt = pickle.load(f)
+            result_qt_str = str(new_qt)
 
         self.assertEqual(input_qt_str, result_qt_str)
 
