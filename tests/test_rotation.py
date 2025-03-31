@@ -51,7 +51,7 @@ class TestRegistrationMethods(unittest.TestCase):
 
             qtree = registration.RegistrationQuadTree(source_slide_path=base_path/soure_path, target_slide_path=base_path/target_path, **self.parameters)
             
-            fig, _ = qtree.draw_feature_points(num_sub_pic=5, figsize=(10, 10), patch_size=64)
+            fig = qtree.draw_feature_points(num_sub_pic=5, figsize=(10, 10), patch_size=64)[0]
             fig.savefig(self.pic_results / f'{soure_path.stem}-{target_path.stem}.png') 
 
             angle = qtree.get_rotation_angle
